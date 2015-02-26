@@ -1,0 +1,1098 @@
+options {
+    OUTPUT_DIRECTORY="src/wci/frontend";
+    JJTREE_OUTPUT_DIRECTORY="src/wci/frontend";
+    NODE_EXTENDS="wci.intermediate.icodeimpl.ICodeNodeImpl";
+    MULTI=true;
+    VISITOR=true;
+    //DEBUG_PARSER=true;
+    //DEBUG_TOKEN_MANAGER=true;
+    //DEBUG_LOOKAHEAD=true;
+}
+
+PARSER_BEGIN(CParser)
+package wci.frontend;
+
+import java.util.ArrayList;
+import java.io.*;
+import java.util.*;
+
+import wci.intermediate.*;
+import wci.intermediate.symtabimpl.*;
+import wci.backend.*;
+import wci.backend.compiler.CodeGenerator;
+import wci.util.*;
+
+import static wci.intermediate.symtabimpl.SymTabKeyImpl.*;
+import static wci.intermediate.symtabimpl.DefinitionImpl.*;
+import static wci.intermediate.symtabimpl.RoutineCodeImpl.*;
+import static wci.intermediate.symtabimpl.SymTabKeyImpl.*;
+import static wci.intermediate.icodeimpl.ICodeKeyImpl.*;
+
+public class CParser
+{
+    private static final String SOURCE_SUFFIX = ".c";
+    private static final String OUTPUT_SUFFIX = ".j";
+    private static int whilec=1, ifc=1,casec=1,forc=1;
+    private static SymTabStack symTabStack;
+    private static SymTabEntry programId;
+    private static ArrayList<SymTabEntry> funcs;
+    private static int localsCount;
+
+    private static HashSet syncSet;
+    static {
+        syncSet = new HashSet();
+        syncSet.add(SEMICOLON);
+        syncSet.add(EOF);
+    }
+
+    public static void main(String[] args)
+        throws FileNotFoundException, Exception
+    {
+      // Create and initialize the symbol table stack.
+        symTabStack = SymTabFactory.createSymTabStack();
+        Predefined.initialize(symTabStack);
+
+        funcs = new ArrayList<SymTabEntry >();
+
+        // Process the source file path which ends in .c
+        // and create the output file path which ends in .j
+        String sourceFilePath = args[0];
+        int truncatedLength = sourceFilePath.length() - SOURCE_SUFFIX.length();
+        int suffixIndex = sourceFilePath.lastIndexOf(SOURCE_SUFFIX);
+        String objectFilePath = (suffixIndex == truncatedLength)
+            ? sourceFilePath.substring(0, truncatedLength) + OUTPUT_SUFFIX
+            : sourceFilePath + OUTPUT_SUFFIX;
+
+        BufferedReader sr = new BufferedReader(new FileReader(args[0]));
+        CParser parser = new CParser(sr);
+
+        SimpleNode rootNode = null;
+
+        // set the programId info
+        String programName = CodeGenerator.generateProgramName(objectFilePath);
+        /*programId = symTabStack.enterLocal(programName);
+        programId.setDefinition(DefinitionImpl.PROGRAM);
+        programId.setAttribute(ROUTINE_SYMTAB, symTabStack.push());
+        symTabStack.setProgramId(programId);*/
+
+        try {
+            rootNode = parser.program();
+            rootNode.dump(">");
+        } catch (ParseException ex) {
+            ex.printStackTrace();
+        } finally {           // Print the cross-reference table.
+            CrossReferencer crossReferencer = new CrossReferencer();
+            crossReferencer.print(symTabStack);
+        }
+
+        if (rootNode == null) return;
+
+        // Visit the parse tree nodes to decorate them with type information.
+        TypeSetterVisitor typeVisitor = new TypeSetterVisitor();
+        rootNode.jjtAccept(typeVisitor, null);
+
+        // Create and initialize the ICode wrapper for the parse tree.
+        ICode iCode = ICodeFactory.createICode();
+        iCode.setRoot(rootNode);
+        programId.setAttribute(ROUTINE_ICODE, iCode);
+
+        // Create the compiler backend and generate code.
+        Backend backend = BackendFactory.createBackend("compile");
+        backend.process(iCode, symTabStack, objectFilePath);
+    }
+}
+PARSER_END(CParser)
+
+SKIP: {
+    <SPACE: " ">
+    | <WHITESPACE: ["\n", "\r", "\t", " "]>
+    | <EOL     : "\r" | "\n" | "\r\n">
+}
+
+TOKEN: {
+    // special symbols
+    // according to ISO/IEC 9899:TC2, p. 63
+    // http://www.open-std.org/jtc1/sc22/wg14/www/docs/n1124.pdf
+    <LEFT_BRACKET: "[">
+    | <RIGHT_BRACKET: "]">
+    | <LEFT_PAREN: "(">
+    | <RIGHT_PAREN: ")">
+    | <LEFT_BRACE: "{">
+    | <RIGHT_BRACE: "}">
+    | <DOT: ".">
+    | <POINTER_DEREF: "->">
+    | <PLUS_PLUS: "++">
+    | <MINUS_MINUS: "--">
+    | <AMPERSAND: "&">
+    | <STAR: "*">
+    | <PLUS: "+">
+    | <MINUS: "-">
+    | <TILDE: "~">
+    | <BANG: "!">
+    | <SLASH: "/">
+    | <MOD: "%">
+    | <LEFT_SHIFT: "<<">
+    | <RIGHT_SHIFT: ">>">
+    | <LESS_THAN: "<">
+    | <GREATER_THAN: ">">
+    | <LESS_EQUALS: "<=">
+    | <GREATER_EQUALS: ">=">
+    | <EQUALS_EQUALS: "==">
+    | <NOT_EQUALS: "!=">
+    | <CARET: "^">
+    | <VERT_BAR: "|">
+    | <LOGICAL_AND: "&&">
+    | <LOGICAL_OR: "||">
+    | <QUESTION_MARK: "?">
+    | <COLON: ":">
+    | <SEMICOLON: ";">
+    | <ELLIPSES: "...">
+    | <EQUALS: "=">
+    | <TIMES_EQUALS: "*=">
+    | <DIV_EQUALS: "/=">
+    | <MOD_EQUALS: "%=">
+    | <PLUS_EQUALS: "+=">
+    | <MINUS_EQUALS: "-=">
+    | <LEFT_SHIFT_EQUALS: "<<=">
+    | <RIGHT_SHIFT_EQUALS: ">>=">
+    | <AND_EQUALS: "&=">
+    | <XOR_EQUALS: "^=">
+    | <OR_EQUALS: "|=">
+    | <COMMA: ",">
+    | <HASH: "#">
+    | <HASH_HASH: "##">
+    | <APOSTROPHE: "'"> : CHAR_STATE
+    | <QUOTE: "\""> : STRING_STATE
+
+    | <#LETTER: (["a"-"z", "A"-"Z"])>
+    | <#HEX_VALUE: (<DIGIT> | ["a"-"f", "A"-"F"])>
+
+    // numbers
+    |
+    <FLOAT_LITERAL: (<DIGIT>)+ <DOT> (<DIGIT>)+ (<EXPONENT>)?
+        | (<DIGIT>)+ (<DOT> (<DIGIT>)*)? <EXPONENT>
+        | (<DIGIT>)* <DOT> (<DIGIT>)+ (<EXPONENT>)?
+        | (<DIGIT>)* (<DOT>)? (<DIGIT>)+ <EXPONENT> >
+    | <INT_LITERAL: (<DECIMAL> | <OCTAL> | <HEXADECIMAL>) ("u" | "ul" | "l")? >
+    | <#DECIMAL: ["1"-"9"] (["0"-"9"])*>
+    | <#OCTAL: "0" (["0"-"7"])*>
+    | <#HEXADECIMAL: ("0x"|"0X") (<HEX_VALUE>)+>
+    | <#EXPONENT: ("E"|"e") ("+"|"-")? (<DIGIT>)+>
+    | <#DIGIT: ["0"-"9"]>
+
+    // reserved words
+    // according to ISO/IEC 9899:TC2, p. 50
+    // http://www.open-std.org/jtc1/sc22/wg14/www/docs/n1124.pdf
+    | <RW_AUTO: "auto">
+    | <RW_BREAK: "break">
+    | <RW_CASE: "case">
+    | <RW_CHAR: "char">
+    | <RW_CONST: "const">
+    | <RW_CONTINUE: "continue">
+    | <RW_DEFAULT: "default">
+    | <RW_DO: "do">
+    | <RW_DOUBLE: "double">
+    | <RW_ELSE: "else">
+    | <RW_ENUM: "enum">
+    | <RW_EXTERN: "extern">
+    | <RW_FLOAT: "float">
+    | <RW_FOR: "for">
+    | <RW_GOTO: "goto">
+    | <RW_IF: "if">
+    | <RW_INLINE: "inline">
+    | <RW_INT: "int">
+    | <RW_LONG: "long">
+    | <RW_REGISTER: "register">
+    | <RW_RESTRICT: "restrict">
+    | <RW_RETURN: "return">
+    | <RW_SHORT: "short">
+    | <RW_SIGNED: "signed">
+    | <RW_SIZEOF: "sizeof">
+    | <RW_STATIC: "static">
+    | <RW_STRUCT: "struct">
+    | <RW_SWITCH: "switch">
+    | <RW_TYPEDEF: "typedef">
+    | <RW_UNION: "union">
+    | <RW_UNSIGNED: "unsigned">
+    | <RW_VOID: "void">
+    | <RW_VOLATILE: "volatile">
+    | <RW_WHILE: "while">
+    | <RW_MAIN: "main">
+    // not listed as a keyword, but might as well keep them here
+    | <RW_TRUE: "true">
+    | <RW_FALSE: "false">
+    | <RW_NULL: "NULL">
+	| < RW_PRINT:"printf" >
+
+    // identifiers
+    | <IDENTIFIER: <LETTER>  (["a"-"z", "A"-"Z", "0"-"9", "_"])*>
+}
+
+MORE: {
+    "/*": IN_MULTI_COMMENT
+}
+
+<IN_MULTI_COMMENT>
+MORE: {
+    <~[]>
+}
+
+<IN_MULTI_COMMENT>
+SPECIAL_TOKEN: {
+    <MULTI_COMMENT_END: ("*/")("\n")?>: DEFAULT
+}
+
+<STRING_STATE>
+MORE: {
+    "\\": ESCAPE_STRING_STATE
+}
+
+<CHAR_STATE>
+MORE: {
+    "\\": ESCAPE_CHAR_STATE
+}
+
+<STRING_STATE>
+TOKEN: {
+    <ENDQUOTE: <QUOTE> > : DEFAULT
+    | <STRING_CHAR: ~["\"", "\\"]>
+}
+
+<CHAR_STATE>
+TOKEN: {
+    <ENDAPOSTROPHE: <APOSTROPHE> > : DEFAULT
+    | <CHAR_CHAR: <STRING_CHAR> >
+}
+
+<ESCAPE_STRING_STATE>
+TOKEN:
+{
+  <STRING_CNTRL_ESC:["\"","\\","/","b","f","n","r","t"]> : STRING_STATE
+}
+
+<ESCAPE_CHAR_STATE>
+TOKEN:
+{
+  <CHAR_CNTRL_ESC:["\"","\\","/","b","f","n","r","t"]> : CHAR_STATE
+}
+
+SPECIAL_TOKEN: {
+    <SINGLE_LINE_COMMENT: "//" (~["\n","\r"])* ("\n"|"\r"|"\r\n")>
+}
+
+SimpleNode Expression(HashSet syncSet) : { SimpleNode rootNode; } {
+    LOOKAHEAD(3)
+    try {
+        functionCallExpr()
+    } catch (ParseException e) {
+        handleError(e, syncSet, false);
+    }
+    { return jjtThis; }
+
+    // if it's not any complete legal statement, fall back to looking for
+    // standalone tokens
+    | LOOKAHEAD(2) singleToken(syncSet)
+    { return jjtThis; }
+
+    // otherwise, it's an error
+    | (Err())+
+}
+
+void singleToken(HashSet syncSet) : {} {
+  try  {    
+    Number()
+    | Character()
+    | String()
+    | Identifier()
+    | ReservedWord()
+    | SpecialSymbol()
+  }catch(ParseException ex)  {
+  	  handleError(ex, syncSet, false);  }
+}
+
+TypeSpec VariableTypes():
+{}
+{
+    <RW_FLOAT > {
+        jjtThis.setTypeSpec(Predefined.floatType);
+        return Predefined.floatType;
+    }
+    | <RW_DOUBLE > {
+        jjtThis.setTypeSpec(Predefined.floatType); 
+        return Predefined.floatType;
+    }
+    | <RW_INT > {
+        jjtThis.setTypeSpec(Predefined.integerType);
+        return Predefined.integerType;
+    }
+    | <RW_LONG > {
+        jjtThis.setTypeSpec(Predefined.integerType);
+        return Predefined.integerType;
+    }
+    | <RW_CHAR > {
+        jjtThis.setTypeSpec(Predefined.charType);
+        return Predefined.charType;
+    }
+    | <RW_VOID > {
+        jjtThis.setTypeSpec(Predefined.voidType);
+        return Predefined.voidType;
+    }
+}
+
+SymTabEntry VariableDeclarationExpr() : {
+  HashSet syncSet = new HashSet();
+    syncSet.add(SEMICOLON);
+    syncSet.add(EOF);
+    SymTabEntry variableId;
+    SimpleNode identNode;
+    int index = 0;
+}
+{
+    VariableTypes() {
+        SymTabEntry typeId = symTabStack.lookup(token.image);
+        typeId.appendLineNumber(token.beginLine);
+        TypeSpec type = typeId.getTypeSpec();
+    }
+    (
+        identNode = Identifier() {
+            variableId = processVariableDecl(token, index++, type);
+            identNode.setAttribute(ID, variableId);
+            jjtThis.setTypeSpec(type);
+        }
+
+        ((<EQUALS>) Expression(syncSet))?
+    ) {
+        return variableId;
+    }
+}
+
+void VariableDeclaration() : {} {
+    VariableDeclarationExpr()
+    <SEMICOLON>
+}
+
+ArrayList<SymTabEntry> VariableDeclarationList() : {
+    SymTabEntry param;
+    ArrayList<SymTabEntry> params = new ArrayList<SymTabEntry>();
+} {
+    param = VariableDeclarationExpr() {
+        if(param != null) {
+            params.add(param);
+        }
+    }
+    (
+        <COMMA>
+        param = VariableDeclarationExpr() { params.add(param); }
+    )* { return params; }
+}
+
+SimpleNode program() : {} {
+    (LOOKAHEAD(2) functionDefinition())*
+    main()
+    { return jjtThis; }
+}
+
+SimpleNode main() : {
+    localsCount = 0;
+} {
+  try  {    
+    <RW_INT> <RW_MAIN>{
+      programId = symTabStack.enterLocal(token.image);
+        programId.setDefinition(DefinitionImpl.PROGRAM);
+        programId.setAttribute(ROUTINE_SYMTAB, symTabStack.push());
+        programId.setAttribute(ROUTINE_ROUTINES,funcs);
+        symTabStack.setProgramId(programId);        
+    } <LEFT_PAREN> <RIGHT_PAREN>
+
+    compoundStatement() {
+        programId.setAttribute(ROUTINE_LOCALS_COUNT, localsCount);
+        return jjtThis;
+    }
+  }catch (ParseException ex) {
+        HashSet syncSet = new HashSet();
+        syncSet.add(EOF);
+
+        handleError(ex, syncSet, true);
+        return null;
+    }
+}
+
+SimpleNode statementList(HashSet syncSet) : {} {
+    (
+        LOOKAHEAD(2) Statement(syncSet)
+    )+
+    { return jjtThis; }
+}
+
+SimpleNode compoundStatement() : {
+  HashSet syncSet = new HashSet();
+    syncSet.add(SEMICOLON);
+    syncSet.add(EOF);}
+{
+    <LEFT_BRACE>
+    statementList(syncSet)
+    <RIGHT_BRACE>
+    { return jjtThis; }
+}
+
+void Statement(HashSet syncSet) #void : {}
+{
+    try  {
+          ifStatement()
+        | VariableDeclaration()
+        | LOOKAHEAD(3) assignmentStatement()
+        | functionCallStatement()
+        | switchStatement()
+        | whileStatement()
+        | forStatement()
+        | emptyStatement()
+        | jumpStatement()
+
+    } catch (ParseException ex) {
+         handleError(ex, syncSet, false);
+    }
+}
+
+void functionCallStatement() : {} {
+    functionCallExpr() <SEMICOLON>
+}
+
+SimpleNode Identifier() : {} {
+    <IDENTIFIER> {
+        jjtThis.jjtSetValue(token.image);
+        SymTabEntry id = symTabStack.lookup(token.image);
+        if(id!=null) {   
+            id.appendLineNumber(token.beginLine);
+            jjtThis.setAttribute(ID, id);
+
+            TypeSpec type = id.getTypeSpec();
+            if(type != null) {
+                jjtThis.setTypeSpec(type);
+            }
+        }
+
+        return jjtThis;
+    }
+}
+
+void ReservedWord() : {} {
+    (
+    <RW_AUTO> | <RW_BREAK> | <RW_CASE> | <RW_CHAR> | <RW_CONST> | <RW_CONTINUE>
+    | <RW_DEFAULT> | <RW_DO> | <RW_DOUBLE> | <RW_ELSE> | <RW_ENUM>
+    | <RW_EXTERN> | <RW_FLOAT> | <RW_FOR> | <RW_GOTO> | <RW_IF> | <RW_INLINE>
+    | <RW_INT> | <RW_LONG> | <RW_REGISTER> | <RW_RESTRICT> | <RW_RETURN>
+    | <RW_SHORT> | <RW_SIGNED> | <RW_SIZEOF> | <RW_STATIC> | <RW_STRUCT>
+    | <RW_SWITCH> | <RW_TYPEDEF> | <RW_UNION> | <RW_UNSIGNED> | <RW_VOID>
+    | <RW_VOLATILE> | <RW_WHILE> | <RW_TRUE> | <RW_FALSE> | <RW_NULL>
+    )
+}
+
+void SpecialSymbol() : {} {
+    (
+    <LEFT_BRACKET> | <RIGHT_BRACKET> | <LEFT_PAREN> | <RIGHT_PAREN>
+    | <LEFT_BRACE> | <RIGHT_BRACE> | <DOT> | <POINTER_DEREF> | <PLUS_PLUS>
+    | <MINUS_MINUS> | <AMPERSAND> | <STAR> | <PLUS> | <MINUS> | <TILDE>
+    | <BANG> | <SLASH> | <MOD> | <LEFT_SHIFT> | <RIGHT_SHIFT> | <LESS_THAN>
+    | <GREATER_THAN> | <LESS_EQUALS> | <GREATER_EQUALS> | <EQUALS_EQUALS>
+    | <NOT_EQUALS> | <CARET> | <VERT_BAR> | <LOGICAL_AND> | <LOGICAL_OR>
+    | <QUESTION_MARK> | <COLON> | <SEMICOLON> | <ELLIPSES>| <EQUALS>
+    | <TIMES_EQUALS> | <DIV_EQUALS> | <MOD_EQUALS> | <PLUS_EQUALS> | <MINUS_EQUALS>
+    | <LEFT_SHIFT_EQUALS> | <RIGHT_SHIFT_EQUALS> | <AND_EQUALS> | <XOR_EQUALS>
+    | <OR_EQUALS> | <COMMA> | <HASH> | <HASH_HASH>
+    )
+}
+
+void Number() : {} {
+    floatLiteral()
+    | intLiteral()
+}
+
+void floatLiteral() : {} {
+    <FLOAT_LITERAL>
+    {
+        String image = token.image;
+        try {
+            Float val = new Float(image);
+            jjtThis.jjtSetValue(val);
+            jjtThis.setTypeSpec(Predefined.floatType);
+          jjtThis.setAttribute(VALUE, Float.parseFloat(token.image));
+        } catch(NumberFormatException e ) {}
+    }
+}
+
+void intLiteral() : {} {
+    <INT_LITERAL>
+    {
+        String image = token.image;
+        try {
+            Integer val = new Integer(image);
+            jjtThis.setTypeSpec(Predefined.integerType);
+             jjtThis.setAttribute(VALUE, Integer.parseInt(token.image));
+            jjtThis.jjtSetValue(val);
+        } catch(NumberFormatException e ) {}
+    }
+}
+
+char Character() : {StringBuilder sb = new StringBuilder();} {
+    <APOSTROPHE> getChar(sb) <ENDAPOSTROPHE> {
+        Character c = new Character(sb.toString().charAt(0));
+        jjtThis.jjtSetValue(c);
+        return sb.toString().charAt(0);
+    }
+}
+
+String String() : { StringBuilder sb = new StringBuilder(); } {
+    <QUOTE> (getChar(sb))* <ENDQUOTE> {
+        String val = sb.toString();
+        jjtThis.setTypeSpec(Predefined.charType);
+        jjtThis.setAttribute(VALUE, val);
+        jjtThis.jjtSetValue(val);
+        return val;
+    }
+}
+
+void getChar(StringBuilder builder) #void : { Token t; } {
+  ( t = <STRING_CHAR> | t = <CHAR_CHAR> | t = <STRING_CNTRL_ESC> | t = <CHAR_CNTRL_ESC> ) {
+        if (t.image.length() < 2) {
+            // CHAR
+            builder.append(t.image.charAt(0));
+        } else if (t.image.length() < 6) {
+            // ESC
+            char c = t.image.charAt(1);
+            switch (c) {
+                case 'b':
+                    builder.append('\b');
+                    break;
+                case 'f':
+                    builder.append('\f');
+                    break;
+                case 'n':
+                    builder.append('\n');
+                    break;
+                case 'r':
+                    builder.append('\r');
+                    break;
+                case 't':
+                    builder.append('\t');
+                    break;
+                default:
+                    builder.append(c);
+            }
+        }
+    }
+}
+
+void Err() : {} {
+    <ERR: ~[]>
+    { System.out.println("error: " + token.image); }
+}
+
+void printStatement() #printStatement : {
+    SimpleNode identNode;
+} {
+  
+    < RW_PRINT > <LEFT_PAREN>
+    
+    (
+        Number()
+        | Character()
+        | String()
+        | identNode = Identifier() {
+            SymTabEntry variableId = symTabStack.lookup(token.image);
+            if(variableId == null) {
+                handleError(
+                    new ParseException("Undeclared identifier: " + token.image),
+                    syncSet, true
+                );
+                return;
+            }
+            identNode.setAttribute(ID, variableId);
+        }
+    )
+  
+  
+    <RIGHT_PAREN>
+}
+
+void jumpStatement() : {
+    HashSet syncSet = new HashSet();    
+    syncSet.add(SEMICOLON);
+    syncSet.add(EOF);
+}
+{
+    try {
+        (
+            ( <RW_CONTINUE> | <RW_BREAK> ) {
+                jjtThis.jjtSetValue(token.image);
+            }
+            | returnExpr() 
+        )
+        <SEMICOLON>
+    } catch (ParseException ex) {
+         handleError(ex, syncSet, false);
+    }          
+}
+
+void returnExpr() : {
+	HashSet syncSet = new HashSet();    
+    syncSet.add(SEMICOLON);
+    syncSet.add(EOF);
+  } {
+    <RW_RETURN>
+    Expression(syncSet)
+}
+
+void emptyStatement() : {} {
+    <SEMICOLON>
+}
+
+void assignmentStatement():{
+    SimpleNode identNode;
+    HashSet syncSet = new HashSet();    
+    syncSet.add(SEMICOLON);
+    syncSet.add(EOF);
+}
+{
+    identNode = Identifier() {
+        SymTabEntry variableId = symTabStack.lookup(token.image);
+        try {
+            variableId.appendLineNumber(token.beginLine);
+            identNode.setAttribute(ID, variableId);
+        } catch (NullPointerException e) {
+            handleError(new ParseException("Undeclared identifier"), syncSet, false);
+            return;
+        }
+    }          
+    (
+      assignOp()
+      Expression(syncSet)
+
+      <SEMICOLON>
+    )
+}
+
+void forStatement():{
+    HashSet syncSet = new HashSet();
+    syncSet.add(LEFT_BRACE);
+    syncSet.add(EOF);
+}
+{
+    <RW_FOR>
+    <LEFT_PAREN>
+    (assignmentExpr())?
+    <SEMICOLON>
+    (LOOKAHEAD(2) Expression(syncSet))?
+    <SEMICOLON>
+    (assignmentExpr())?
+    < RIGHT_PAREN > {
+       enterScope("for"+Integer.toString(forc++),DefinitionImpl.FOR);
+    }
+    (LOOKAHEAD(3)compoundStatement() | LOOKAHEAD(3)Statement(syncSet)) {
+        leaveScope();
+    }
+}
+
+void ifStatement() :{
+HashSet syncSet = new HashSet();
+    syncSet.add(SEMICOLON);
+    syncSet.add(LEFT_BRACE);
+    syncSet.add(RW_ELSE);
+    syncSet.add(EOF);
+    }
+{
+    <RW_IF> 
+    <LEFT_PAREN>
+    Expression(syncSet)
+    <RIGHT_PAREN> {
+        enterScope("if"+Integer.toString(ifc++),DefinitionImpl.IF);
+    }
+    (LOOKAHEAD(1)compoundStatement() | Statement(syncSet)) {
+        leaveScope();
+    }
+    (
+        LOOKAHEAD(2) <RW_ELSE>
+        <RW_IF>
+        <LEFT_PAREN>
+        Expression(syncSet)
+        <RIGHT_PAREN> {
+            enterScope("if"+Integer.toString(ifc++),DefinitionImpl.IF);
+        }
+        compoundStatement() {
+            leaveScope();
+        }
+    )*
+    (
+        LOOKAHEAD(2) <RW_ELSE> {
+            enterScope("if"+Integer.toString(ifc++),DefinitionImpl.IF);
+        }
+        (LOOKAHEAD(3)compoundStatement() | Statement(syncSet)) {
+            leaveScope();
+        }
+    )?
+}
+
+void whileStatement():{
+    HashSet syncSet1 = new HashSet();
+    syncSet1.add(SEMICOLON);
+    syncSet1.add(IDENTIFIER);
+    syncSet1.add(LEFT_BRACE);
+    syncSet1.add(EOF);
+    
+    HashSet syncSet2 = new HashSet();
+    syncSet2.add(SEMICOLON);
+    syncSet2.add(EOF);
+}
+{
+  try  {    
+    <RW_WHILE >
+    <LEFT_PAREN >
+    Expression(syncSet1)
+    <RIGHT_PAREN > {
+        enterScope("while"+Integer.toString(whilec++),DefinitionImpl.WHILE);
+    }
+    ((Statement(syncSet2))|(compoundStatement())) {
+        leaveScope();
+    }
+  }catch(ParseException ex)  {	handleError(ex, syncSet, true);
+  }
+}
+
+SimpleNode switchStatement() : {
+  SimpleNode rootNode;
+  HashSet syncSet = new HashSet();
+    
+    syncSet.add(SEMICOLON);
+    syncSet.add(LEFT_BRACE);
+    syncSet.add(RW_CASE);
+    syncSet.add(EOF);
+     }
+{
+    < RW_SWITCH >
+    <LEFT_PAREN >
+    Expression(syncSet)
+    <RIGHT_PAREN >
+    <LEFT_BRACE >
+    caseBlock()
+    <RIGHT_BRACE >
+    { return jjtThis; }
+}
+
+void caseBlock() : {}
+{ 
+    (caseExpr())*
+    /*(
+        caseExpr(syncSet1)
+        (statementList(syncSet1) | compoundStatement())
+        ((<RW_BREAK>) { System.out.println(token.image); } <SEMICOLON>)?
+         
+    )*
+
+    (
+        <RW_DEFAULT> { System.out.print("\n" + token.image); }
+        <COLON> { System.out.print(token.image + " "); }
+
+        (LOOKAHEAD(3)Statement(syncSet2)|compoundStatement())?
+    )?*/
+}
+
+void caseExpr() : {
+    HashSet syncSet1 = new HashSet();
+    syncSet1.add(RW_CASE);
+    syncSet1.add(RW_DEFAULT);
+    syncSet1.add(SEMICOLON);
+    syncSet1.add(EOF);
+
+    HashSet syncSet2 = new HashSet();
+    syncSet2.add(SEMICOLON);
+    syncSet2.add(EOF);
+} {
+  try  {  
+    (
+        (
+         <RW_CASE> {
+             jjtThis.jjtSetValue(token.image);
+         }
+         literalExpr(syncSet1)
+        )
+        |
+        <RW_DEFAULT> { jjtThis.jjtSetValue(token.image); }
+    )
+    <COLON> {
+        enterScope("case"+Integer.toString(casec++),DefinitionImpl.CASE);
+    }
+    (statementList(syncSet2) | compoundStatement()) {
+        leaveScope();
+    }
+    } catch (ParseException ex) {
+        handleError(ex, syncSet1, false);
+    }
+}
+
+void literalExpr(HashSet syncSet) : {} {
+  try  {    
+    <INT_LITERAL> {
+        String image = token.image;
+        try{
+            Integer val = new Integer(image);
+            jjtThis.jjtSetValue(val);
+        } catch(NumberFormatException e) {}
+    }
+    | <FLOAT_LITERAL>
+    | String()
+    | Character()
+  } catch (ParseException ex) {
+         handleError(ex, syncSet, false);
+    }
+}
+
+
+void functionCallExpr() : {} {
+	LOOKAHEAD(3) printStatement()
+	| 
+    LOOKAHEAD(2)
+    (
+        Identifier() {
+            jjtThis.jjtSetValue(token.image);
+            SymTabEntry funcId = symTabStack.lookup(token.image);
+            if (funcId == null) {
+                handleError(new ParseException("Undeclared method"), syncSet, true);
+                return;
+            }
+            jjtThis.setAttribute(ID, funcId);
+        }
+        <LEFT_PAREN>
+        (LOOKAHEAD(2) exprList())?
+        <RIGHT_PAREN>
+    )
+    | assignmentExpr()
+    
+}
+
+void exprList() : {} {
+    assignmentExpr()
+    (
+        <COMMA> assignmentExpr()
+    )*
+}
+
+void functionDefinition() : { Token t;
+    HashSet syncSet = new HashSet();    
+    syncSet.add(SEMICOLON);
+    syncSet.add(RW_MAIN);
+    syncSet.add(EOF);
+    TypeSpec returnType = null;
+    ArrayList<SymTabEntry> varDeclList = new ArrayList<SymTabEntry>();
+    localsCount = 0;
+     } {
+       try{
+        returnType = VariableTypes()
+        Identifier() {
+            SymTabEntry funcId = symTabStack.enterLocal(token.image);
+            funcId.setDefinition(DefinitionImpl.FUNCTION);
+            funcId.setAttribute(ROUTINE_CODE, DECLARED);
+            funcId.setAttribute(ROUTINE_SYMTAB, symTabStack.push());
+            funcId.setTypeSpec(returnType);
+            jjtThis.setAttribute(ID, funcId);
+        }
+    <LEFT_PAREN>
+    (
+        varDeclList = VariableDeclarationList()
+        {
+            funcId.setAttribute(ROUTINE_PARMS, varDeclList);
+        }
+    )?
+    <RIGHT_PAREN>
+    compoundStatement()    {
+        funcId.setAttribute(ROUTINE_LOCALS_COUNT, localsCount);
+        funcs.add(funcId);
+        leaveScope();
+    }
+  }catch(ParseException ex)  {  handleError(ex, syncSet, true);
+  }
+}
+
+void assignOp() #void : {}
+{
+    <EQUALS>
+}
+
+void constant() : {} {
+    intLiteral()
+    | floatLiteral()
+    | Character()
+}
+
+void primaryExpr() : {HashSet syncSet = new HashSet();    
+    syncSet.add(SEMICOLON);
+    syncSet.add(EOF);} {
+    Identifier()
+    | constant()
+    | String()
+    | <LEFT_PAREN> Expression(syncSet) <RIGHT_PAREN>
+}
+
+void postfixExpr() : {
+  HashSet syncSet = new HashSet();    
+    syncSet.add(SEMICOLON);
+    syncSet.add(EOF);} {
+    LOOKAHEAD(3) primaryExpr()
+    | LOOKAHEAD(3) primaryExpr() (LOOKAHEAD(2) <LEFT_BRACKET> Expression(syncSet) <RIGHT_BRACKET>)*
+    //| postfixExpr() <LEFT_PAREN> argExprList() <RIGHT_PAREN>
+    | LOOKAHEAD(3) primaryExpr() (LOOKAHEAD(2) <DOT> Identifier())*
+    | LOOKAHEAD(3) primaryExpr() (LOOKAHEAD(2) <POINTER_DEREF> Identifier())*
+    //| LOOKAHEAD(3) primaryExpr() (<PLUS_PLUS>)*
+    //| LOOKAHEAD(3) primaryExpr() (<MINUS_MINUS>)*
+    //| ( type-name ) { initializer-list }
+    //| ( type-name ) { initializer-list, }
+}
+
+void unaryExpr() : {} {
+    postfixExpr()
+    | <PLUS_PLUS> unaryExpr()
+    | <MINUS_MINUS> unaryExpr()
+    | LOOKAHEAD(2) <RW_SIZEOF> unaryExpr()
+    | <RW_SIZEOF> VariableTypes()
+}
+
+void multExpr() : {} {
+    unaryExpr()
+    (
+        LOOKAHEAD(2)
+        (
+            <STAR>
+            | <SLASH>
+            | <MOD>
+        ) {jjtThis.jjtSetValue(token.image); }
+        multExpr()
+    )*
+}
+
+void addExpr() : {} {
+    multExpr()
+    (
+        LOOKAHEAD(2)
+        (
+            <PLUS>
+            | <MINUS>
+        ) {jjtThis.jjtSetValue(token.image); }
+        addExpr()
+    )*
+}
+
+void relationExpr() : {} {
+    addExpr()
+    (
+        LOOKAHEAD(2)
+        (
+            <LESS_THAN>
+            | <GREATER_THAN>
+            | <LESS_EQUALS>
+            | <GREATER_EQUALS>
+        ) { jjtThis.jjtSetValue(token.image); }
+        relationExpr()
+    )*
+}
+
+void equalityExpr() : {} {
+    relationExpr()
+    (
+        LOOKAHEAD(2)
+        (
+            <EQUALS_EQUALS>
+            | <NOT_EQUALS>
+        ) { jjtThis.jjtSetValue(token.image); }
+        equalityExpr()
+    )*
+}
+
+void logicalAndExpr() : {} {
+    equalityExpr()
+    (
+        LOOKAHEAD(2)
+        <LOGICAL_AND>
+        logicalAndExpr()
+    )*
+}
+
+void logicalOrExpr() : {} {
+    logicalAndExpr()
+    (
+        LOOKAHEAD(2)
+        <LOGICAL_OR>
+        logicalOrExpr()
+    )*
+}
+
+void conditionalExpr() : {
+  HashSet syncSet = new HashSet();    
+    syncSet.add(SEMICOLON);
+    syncSet.add(EOF);} {
+    logicalOrExpr()
+    (
+        LOOKAHEAD(2)
+        <QUESTION_MARK>
+        Expression(syncSet)
+        conditionalExpr()
+    )*
+}
+
+void assignmentExpr() : {} {
+    LOOKAHEAD((unaryExpr() assignOp() assignmentExpr()))
+    (unaryExpr() assignOp() assignmentExpr())
+    | conditionalExpr()
+}
+
+JAVACODE String handleError(ParseException ex, HashSet syncSet, boolean doPop) #void
+{
+   syncSet.add(RW_DOUBLE);
+   syncSet.add(RW_INT);
+   syncSet.add(RW_CHAR);
+   syncSet.add(RW_LONG);
+   syncSet.add(RW_SHORT);
+   syncSet.add(RW_FLOAT);
+   
+   
+    Token token = ex.currentToken;
+    System.out.println(ex.getMessage());
+    
+	/* Iterator iterator = syncSet.iterator();
+    	while(iterator.hasNext())
+   		{
+   		  Object a =iterator.next();
+			System.out.println("My set: "+a);
+    	}*/  
+    // Consume tokens up to but not including a token in the sync set.
+    while(!syncSet.contains(getToken(1).kind)){
+        //System.out.println("Consuming "+getToken(0)+" that is from type "+getToken(0).kind);
+        token = getNextToken();
+    }
+	//System.out.println("Will resume with "+getToken(1).kind+" that is a "+getToken(1));
+    if (doPop) jjtree.popNode();
+    return token.image;
+}
+
+JAVACODE
+SymTabEntry processVariableDecl(Token token, int index, TypeSpec type) #void {
+    SymTabEntry variableId = symTabStack.enterLocal(token.image);
+    variableId.setIndex(index);
+    variableId.setDefinition(DefinitionImpl.VARIABLE);
+    variableId.appendLineNumber(token.beginLine);
+    variableId.setTypeSpec(type);
+    variableId.setAttribute(LOCAL_SLOT, localsCount++);
+    return variableId;
+}
+
+JAVACODE
+void enterScope(String name,Definition def)#void{
+    Definition routineDefn = def;
+    SymTabEntry routineId = symTabStack.enterLocal(name);
+    routineId.setAttribute(ROUTINE_SYMTAB, symTabStack.push());
+    routineId.setAttribute(ROUTINE_ROUTINES,new ArrayList<SymTabEntry>());
+      routineId.setDefinition(routineDefn);
+    routineId.setAttribute(ROUTINE_CODE, DECLARED);
+ }
+
+JAVACODE
+void leaveScope()#void {
+  symTabStack.pop();
+}
